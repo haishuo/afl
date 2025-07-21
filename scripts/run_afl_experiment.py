@@ -28,6 +28,7 @@ from shared.forge_config import get_afl_config, initialize_afl_directories
 
 # Import experiment modules
 from experiments.mnist.mnist_mlp_afl import run_mnist_mlp_afl
+from experiments.wine_quality.wine_quality_mlp_afl import run_wine_quality_mlp_afl
 
 # Available experiments registry
 AVAILABLE_EXPERIMENTS = {
@@ -38,6 +39,13 @@ AVAILABLE_EXPERIMENTS = {
         "status": "implemented",
         "estimated_time": "30-60 minutes"
     },
+    "wine_quality_mlp_256_128_64": {
+        "name": "Wine Quality MLP 256->128->64",
+        "description": "Wine Quality dataset with 3-layer MLP architecture",
+        "function": run_wine_quality_mlp_afl,
+        "status": "implemented",
+        "estimated_time": "20-40 minutes"
+    },
     # Future experiments (not yet implemented)
     "cifar10_resnet18": {
         "name": "CIFAR-10 ResNet-18", 
@@ -45,13 +53,6 @@ AVAILABLE_EXPERIMENTS = {
         "function": None,
         "status": "planned",
         "estimated_time": "2-4 hours"
-    },
-    "wine_quality_mlp": {
-        "name": "Wine Quality MLP",
-        "description": "Wine Quality dataset with MLP architecture", 
-        "function": None,
-        "status": "planned",
-        "estimated_time": "20-40 minutes"
     },
     "cifar100_resnet18": {
         "name": "CIFAR-100 ResNet-18",
@@ -180,7 +181,6 @@ def run_single_experiment(experiment_id: str) -> bool:
 
 def run_all_experiments() -> None:
     """Run all implemented AFL experiments."""
-    
     # Get list of implemented experiments
     implemented_experiments = [
         exp_id for exp_id, exp_info in AVAILABLE_EXPERIMENTS.items() 
