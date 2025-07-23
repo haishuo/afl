@@ -23,6 +23,8 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Tuple
 import sys
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -154,11 +156,66 @@ def load_mnist_data(batch_size: int = 64) -> Tuple[DataLoader, DataLoader]:
     return train_loader, test_loader
 
 
+def train_single_trial(args):
+    """Train a single trial - for parallel execution."""
+    trial_id, sparse_sizes, sparsity, epochs = args
+    
+    # Log start
+    logger.info(f"    Trial {trial_id}: Starting...")
+    
+    # Set seed
+    torch.manual_seed(42 + trial_id + int(sparsity * 1000))
+    np.random.seed(42 + trial_id + int(sparsity * 1000))
+    
+    # Create fresh data loaders for this thread
+    train_loader, test_loader = load_mnist_data()
+    
+    # Create and train model
+    model = ConstructedSparseMLP(sparse_sizes).to(DEVICE)
+    
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    # Train model
+    train_start = time.time()
+    logger.info(f"    Trial {trial_id}: Training for {epochs} epochs...")
+    final_loss = train_constructed_sparse_model(model, train_loader, epochs=epochs)
+    
+    # Evaluate
+    logger.info(f"    Trial {trial_id}: Evaluating...")
+    accuracy = evaluate_model(model, test_loader)
+    trial_time = time.time() - train_start
+    
+    logger.info(f"    Trial {trial_id}: Complete! Accuracy: {accuracy:.2f}%, Time: {trial_time:.1f}s")
+    
+    # Clean GPU memory
+    del model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    return {
+        "trial": trial_id,
+        "accuracy": accuracy,
+        "training_time": trial_time,
+        "final_loss": final_loss,
+        "total_parameters": total_params
+    }
+
+
 def run_constructed_sparse_experiment():
     """Run complete constructed sparse experiment for MNIST."""
     
     logger.info("🚀 Starting MNIST Constructed Sparse Experiment")
     logger.info("=" * 50)
+    
+    # Check if GPU available for parallel execution
+    use_parallel = torch.cuda.is_available() and int(os.environ.get('AFL_MAX_PARALLEL', '1')) > 1
+    max_parallel = int(os.environ.get('AFL_MAX_PARALLEL', '8')) if use_parallel else 1
+    
+    if use_parallel:
+        logger.info(f"🔥 GPU detected - running {max_parallel} trials in parallel")
+    else:
+        logger.info("🐌 Running trials sequentially")
     
     experiment_start = time.time()
     
@@ -203,47 +260,51 @@ def run_constructed_sparse_experiment():
         logger.info(f"Sparse architecture: {sparse_sizes} (total: {sum(sparse_sizes)})")
         logger.info(f"Actual sparsity: {actual_sparsity:.1%}")
         
-        trial_accuracies = []
-        trial_times = []
-        
         # Run multiple trials
-        for trial in range(trials_per_level):
-            trial_start = time.time()
+        if use_parallel:
+            # Parallel execution
+            trial_args = [(trial, sparse_sizes, sparsity, training_epochs) 
+                         for trial in range(trials_per_level)]
             
-            # Set seed for reproducibility
-            torch.manual_seed(42 + trial + int(sparsity * 1000))
-            np.random.seed(42 + trial + int(sparsity * 1000))
-            
-            # Create and train model
-            model = ConstructedSparseMLP(sparse_sizes).to(DEVICE)
-            
-            # Count parameters
-            total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            
-            # Train model
-            final_loss = train_constructed_sparse_model(model, train_loader, epochs=training_epochs)
-            
-            # Evaluate
-            accuracy = evaluate_model(model, test_loader)
-            trial_time = time.time() - trial_start
-            
-            trial_accuracies.append(accuracy)
-            trial_times.append(trial_time)
-            
-            # Store detailed result
+            # Run in batches to avoid overwhelming GPU
+            trial_results = []
+            for i in range(0, trials_per_level, max_parallel):
+                batch = trial_args[i:i+max_parallel]
+                with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                    batch_results = list(executor.map(train_single_trial, batch))
+                    trial_results.extend(batch_results)
+                
+                # Log progress
+                logger.info(f"  Progress: {len(trial_results)}/{trials_per_level} trials completed")
+                if torch.cuda.is_available():
+                    mem_used = torch.cuda.memory_allocated() / 1024**3
+                    mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+                    logger.info(f"  GPU Memory: {mem_used:.1f}/{mem_total:.1f} GB")
+        else:
+            # Sequential execution
+            trial_results = []
+            for trial in range(trials_per_level):
+                result = train_single_trial((trial, sparse_sizes, sparsity, training_epochs))
+                trial_results.append(result)
+                
+                if (trial + 1) % 10 == 0:
+                    logger.info(f"  Progress: {trial + 1}/{trials_per_level} trials completed")
+        
+        # Extract accuracies and times
+        trial_accuracies = [r["accuracy"] for r in trial_results]
+        trial_times = [r["training_time"] for r in trial_results]
+        
+        # Store detailed results
+        for result in trial_results:
             results["detailed_results"].append({
                 "sparsity": sparsity,
-                "trial": trial,
-                "accuracy": accuracy,
+                "trial": result["trial"],
+                "accuracy": result["accuracy"],
                 "architecture": sparse_sizes,
-                "total_parameters": total_params,
-                "training_time": trial_time,
-                "final_loss": final_loss
+                "total_parameters": result["total_parameters"],
+                "training_time": result["training_time"],
+                "final_loss": result["final_loss"]
             })
-            
-            if (trial + 1) % 10 == 0:
-                logger.info(f"  Progress: {trial + 1}/{trials_per_level} trials completed")
-                logger.info(f"  Current mean accuracy: {np.mean(trial_accuracies):.2f}%")
         
         # Compute statistics for this sparsity level
         results["sparsity_results"][f"{sparsity:.1f}"] = {
@@ -291,4 +352,8 @@ def run_constructed_sparse_experiment():
 
 
 if __name__ == "__main__":
+    # Check for GPU optimization flag
+    if os.environ.get('AFL_MAX_PARALLEL', '1') != '1':
+        logger.info("🔥 GPU parallelization enabled")
+    
     run_constructed_sparse_experiment()

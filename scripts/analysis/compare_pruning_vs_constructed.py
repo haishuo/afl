@@ -129,7 +129,15 @@ def compare_experiments(pruned_path: Path, constructed_path: Path,
             pruned_stats = pruned_results["sparsity_results"][sparsity_key]
             constructed_stats = constructed_results["sparsity_results"][sparsity_key]
             
-            pruned_accs = pruned_stats["accuracies"]
+            # Get accuracies - handle different field names
+            if "accuracies" in pruned_stats:
+                pruned_accs = pruned_stats["accuracies"]
+            elif "trial_accuracies" in pruned_stats:
+                pruned_accs = pruned_stats["trial_accuracies"]
+            else:
+                logger.warning(f"No accuracy data found for sparsity {sparsity_key}")
+                continue
+                
             constructed_accs = constructed_stats["accuracies"]
             
             # Statistical comparison
@@ -198,8 +206,26 @@ def compare_experiments(pruned_path: Path, constructed_path: Path,
     output_path = output_dir / f"{dataset.lower()}_pruning_vs_constructed_comparison.json"
     output_dir.mkdir(parents=True, exist_ok=True)
     
+    # Convert numpy types to Python native types for JSON serialization
+    def convert_to_native(obj):
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        elif isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {k: convert_to_native(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_to_native(item) for item in obj]
+        return obj
+    
+    comparison_native = convert_to_native(comparison)
+    
     with open(output_path, 'w') as f:
-        json.dump(comparison, f, indent=2)
+        json.dump(comparison_native, f, indent=2)
     
     logger.info(f"\n✅ Comparison complete!")
     logger.info(f"📄 Results saved to: {output_path}")
